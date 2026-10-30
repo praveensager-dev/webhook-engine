@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EventStatus {
+  PENDING
+  DISPATCHED
+}
+
+enum DeliveryStatus {
+  PENDING
+  RETRYING
+  SUCCEEDED
+  FAILED
+}
+
+/// A developer-registered destination. `eventTypes` holds exact event types or "*".
+model Endpoint {
+  id          String   @id @default(uuid()) @db.Uuid
+  url         String
+  description String?
+  secretKey   String   @map("secret_key")
+  eventTypes  String[] @default(["*"]) @map("event_types")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  deliveries WebhookDelivery[]
+
+  @@index([isActive], map: "endpoints_is_active_idx")
+  @@index([eventTypes], type: Gin, map: "endpoints_event_types_idx")
+  @@map("endpoints")
+}
+
+/// Immutable record of something that happened. Acts as the outbox: PENDING until fan-out commits.
+model Event {
+  id             String      @id @default(uuid()) @db.Uuid
+  eventType      String      @map("event_type")
+  payload        Json
+  idempotencyKey String?     @unique @map("idempotency_key")
+  status         EventStatus @default(PENDING)
+  createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  dispatchedAt   DateTime?   @map("dispatched_at") @db.Timestamptz(6)
+
+  deliveries WebhookDelivery[]
+
+  @@index([eventType, createdAt], map: "events_event_type_created_at_idx")
+  @@index([status, createdAt], map: "events_status_created_at_idx")
+  @@map("events")
+}
+
+/// One row per (event, endpoint). Holds the current state of delivering that event to that endpoint.
+model WebhookDelivery {
+  id             String         @id @default(uuid()) @db.Uuid
+  eventId        String         @map("event_id") @db.Uuid
+  endpointId     String         @map("endpoint_id") @db.Uuid
+  status         DeliveryStatus @default(PENDING)
+  attemptCount   Int            @default(0) @map("attempt_count")
+  lastStatusCode Int?           @map("last_status_code")
+  lastError      String?        @map("last_error")
+  nextAttemptAt  DateTime?      @map("next_attempt_at") @db.Timestamptz(6)
+  deliveredAt    DateTime?      @map("delivered_at") @db.Timestamptz(6)
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  event    Event             @relation(fields: [eventId], references: [id], onDelete: Cascade, map: "webhook_deliveries_event_id_fkey")
+  endpoint Endpoint          @relation(fields: [endpointId], references: [id], onDelete: Cascade, map: "webhook_deliveries_endpoint_id_fkey")
+  attempts DeliveryAttempt[]
+
+  @@unique([eventId, endpointId], map: "webhook_deliveries_event_id_endpoint_id_key")
+  @@index([endpointId, createdAt], map: "webhook_deliveries_endpoint_id_created_at_idx")
+  @@index([status, nextAttemptAt], map: "webhook_deliveries_status_next_attempt_at_idx")
+  @@index([createdAt], map: "webhook_deliveries_created_at_idx")
+  @@map("webhook_deliveries")
+}
+
+/// Append-only log: one row per HTTP attempt.
+model DeliveryAttempt {
+  id              String   @id @default(uuid()) @db.Uuid
+  deliveryId      String   @map("delivery_id") @db.Uuid
+  attemptNumber   Int      @map("attempt_number")
+  success         Boolean
+  statusCode      Int?     @map("status_code")
+  error           String?
+  responseSnippet String?  @map("response_snippet")
+  durationMs      Int      @map("duration_ms")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  delivery WebhookDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade, map: "delivery_attempts_delivery_id_fkey")
+
+  @@index([deliveryId, createdAt], map: "delivery_attempts_delivery_id_created_at_idx")
+  @@map("delivery_attempts")
+}
